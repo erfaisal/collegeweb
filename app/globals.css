@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Default fallbacks */
+  --primary-color: #059669;
+  --primary-dark: #064e3b;
+  --primary-light: #6ee7b7;
+}
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+  }
+}
+
+.transition-theme {
+  @apply transition-all duration-300 ease-in-out;
+}
+
