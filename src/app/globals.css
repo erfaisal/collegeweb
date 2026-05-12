@@ -1,0 +1,206 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* ==========================================================================
+     CSS VARIABLE SYSTEM (DEFAULT LIGHT THEME)
+     Designed to be overridden dynamically via JavaScript ThemeProvider
+     ========================================================================== */
+  :root {
+    /* Colors */
+    --primary-color: #0f172a;
+    --secondary-color: #334155;
+    --accent-color: #3b82f6;
+    
+    --background-color: #ffffff;
+    --surface-color: #f8fafc;
+    
+    --text-color: #0f172a;
+    --muted-text-color: #64748b;
+    --border-color: #e2e8f0;
+    
+    --success-color: #10b981;
+    --warning-color: #f59e0b;
+    --error-color: #ef4444;
+    
+    --navbar-background: #ffffff;
+    --footer-background: #0f172a;
+
+    /* Typography */
+    --font-family: var(--font-inter), ui-sans-serif, system-ui, -apple-system, sans-serif;
+    --heading-font-family: var(--font-inter), ui-sans-serif, system-ui, -apple-system, sans-serif;
+
+    /* Layout & Geometry */
+    --button-radius: 0.375rem;
+    --card-radius: 0.5rem;
+
+    /* Transitions */
+    --transition-speed: 200ms;
+    --transition-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  /* ==========================================================================
+     DARK MODE SUPPORT
+     Toggled via the .dark class on the <html> element
+     ========================================================================== */
+  .dark {
+    --primary-color: #e2e8f0;
+    --secondary-color: #cbd5e1;
+    --accent-color: #60a5fa;
+    
+    --background-color: #0f172a;
+    --surface-color: #1e293b;
+    
+    --text-color: #f8fafc;
+    --muted-text-color: #94a3b8;
+    --border-color: #334155;
+    
+    --navbar-background: #0f172a;
+    --footer-background: #020617;
+  }
+
+  /* ==========================================================================
+     BASE HTML & TYPOGRAPHY SETTINGS
+     ========================================================================== */
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    background-color: var(--background-color);
+    color: var(--text-color);
+    font-family: var(--font-family);
+    transition: background-color var(--transition-speed) var(--transition-ease), 
+                color var(--transition-speed) var(--transition-ease);
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--heading-font-family);
+    color: var(--text-color);
+    @apply font-bold tracking-tight;
+  }
+
+  /* ==========================================================================
+     SCROLLBAR STYLING
+     Modern institutional appearance
+     ========================================================================== */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: var(--background-color);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 9999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--muted-text-color);
+  }
+
+  /* ==========================================================================
+     GLOBAL FORM STYLING
+     Production-safe accessible defaults
+     ========================================================================== */
+  input, 
+  textarea, 
+  select {
+    @apply w-full px-4 py-2 outline-none;
+    background-color: var(--background-color);
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+    border-radius: var(--button-radius);
+    transition: border-color var(--transition-speed) var(--transition-ease),
+                box-shadow var(--transition-speed) var(--transition-ease);
+  }
+
+  input:focus, 
+  textarea:focus, 
+  select:focus {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 1px var(--accent-color);
+  }
+
+  input:disabled, 
+  textarea:disabled, 
+  select:disabled {
+    @apply opacity-50 cursor-not-allowed bg-opacity-50;
+  }
+}
+
+@layer components {
+  /* ==========================================================================
+     REUSABLE CMS UTILITY CLASSES
+     Maintainable, standardized UI building blocks
+     ========================================================================== */
+  
+  .cms-container {
+    @apply w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8;
+  }
+
+  .cms-section {
+    @apply py-12 md:py-16 lg:py-24;
+  }
+
+  .cms-card {
+    background-color: var(--surface-color);
+    border: 1px solid var(--border-color);
+    border-radius: var(--card-radius);
+    @apply overflow-hidden shadow-sm;
+    transition: transform var(--transition-speed) var(--transition-ease),
+                box-shadow var(--transition-speed) var(--transition-ease);
+  }
+
+  .cms-card:hover {
+    @apply shadow-md;
+    transform: translateY(-2px);
+  }
+
+  .cms-button {
+    @apply inline-flex items-center justify-center px-5 py-2.5 font-medium focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed;
+    background-color: var(--primary-color);
+    color: var(--background-color); /* Assumes light bg provides high contrast for primary text */
+    border-radius: var(--button-radius);
+    transition: background-color var(--transition-speed) var(--transition-ease),
+                transform 100ms var(--transition-ease),
+                box-shadow var(--transition-speed) var(--transition-ease);
+  }
+
+  .cms-button:hover:not(:disabled) {
+    background-color: var(--secondary-color);
+    @apply shadow-md;
+  }
+
+  .cms-button:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+
+  .cms-heading {
+    @apply text-3xl md:text-4xl lg:text-5xl font-extrabold mb-4 leading-tight;
+  }
+
+  .cms-subheading {
+    color: var(--muted-text-color);
+    @apply text-lg md:text-xl mb-8 max-w-3xl leading-relaxed;
+  }
+}
+
+@layer utilities {
+  /* ==========================================================================
+     TRANSITION SYSTEM
+     Reusable transition tokens for generic UI elements
+     ========================================================================== */
+  .transition-cms {
+    transition-property: color, background-color, border-color, text-decoration-color, fill, stroke, opacity, box-shadow, transform, filter, backdrop-filter;
+    transition-timing-function: var(--transition-ease);
+    transition-duration: var(--transition-speed);
+  }
+}
