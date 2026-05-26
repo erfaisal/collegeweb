@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { createMiddlewareClient } from "@supabase/auth-helpers-nextjs";
 
+// Operational configuration
+const MAINTENANCE_MODE = false;
+
 export async function middleware(req: NextRequest) {
   try {
     // Create a response object to pass down the chain.
@@ -24,24 +27,44 @@ export async function middleware(req: NextRequest) {
     const path = req.nextUrl.pathname;
     const isLoginRoute = path === "/admin/login";
     const isAdminRoute = path.startsWith("/admin");
+    const isMaintenanceRoute = path === "/maintenance";
+    const isHealthRoute = path === "/api/health";
 
-    // Feature 1 & 3: Redirect unauthenticated users trying to access protected admin routes
+    // Feature 1, 2, 3, 4: Maintenance Mode & Operational Route Governance
+    if (MAINTENANCE_MODE) {
+      // Redirect all public traffic to the maintenance page
+      // Allow exceptions for maintenance page itself, admin routes (bypass), and health checks
+      if (!isMaintenanceRoute && !isAdminRoute && !isHealthRoute) {
+        const maintenanceUrl = req.nextUrl.clone();
+        maintenanceUrl.pathname = "/maintenance";
+        return NextResponse.redirect(maintenanceUrl);
+      }
+    } else {
+      // Prevent access to the maintenance page when the system is fully operational
+      if (isMaintenanceRoute) {
+        const homeUrl = req.nextUrl.clone();
+        homeUrl.pathname = "/";
+        return NextResponse.redirect(homeUrl);
+      }
+    }
+
+    // Existing Feature: Redirect unauthenticated users trying to access protected admin routes
     if (isAdminRoute && !isLoginRoute && !session) {
       const redirectUrl = req.nextUrl.clone();
       redirectUrl.pathname = "/admin/login";
-      // Optional: Preserve the original URL to redirect back after successful login
+      // Preserve the original URL to redirect back after successful login
       redirectUrl.searchParams.set("redirectTo", req.nextUrl.pathname);
       return NextResponse.redirect(redirectUrl);
     }
 
-    // Feature 4: Prevent login redirect loops for already authenticated users
+    // Existing Feature: Prevent login redirect loops for already authenticated users
     if (isLoginRoute && session) {
       const redirectUrl = req.nextUrl.clone();
       redirectUrl.pathname = "/admin/dashboard";
       return NextResponse.redirect(redirectUrl);
     }
 
-    // Feature 5: RBAC-ready architecture placeholder
+    // RBAC-ready architecture placeholder
     /*
     if (isAdminRoute && session) {
       const userRole = session.user.user_metadata?.role || 'user';
@@ -77,9 +100,12 @@ export async function middleware(req: NextRequest) {
 export const config = {
   matcher: [
     /*
-     * Match all request paths that start with /admin
-     * Protects routes like /admin/dashboard, /admin/settings, /admin/users, etc.
+     * Match all request paths except for the ones starting with:
+     * - _next/static (static files)
+     * - _next/image (image optimization files)
+     * - favicon.ico (favicon file)
+     * - any file with an extension (e.g., .svg, .png, .jpg, .jpeg, .gif, .webp)
      */
-    "/admin/:path*",
+    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };
