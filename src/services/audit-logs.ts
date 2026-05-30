@@ -1,210 +1,349 @@
-import { supabase } from "@/lib/supabase";
-import type { 
-  AuditLog, 
-  AuditLogPayload, 
-  AuditActionType, 
-  AuditEntityType, 
-  AuditSeverity, 
-  AuditStatus 
-} from "@/types/audit-log";
+import supabase from "@/lib/supabase";
+import { info, warn, error } from "@/lib/logger";
+import { Database } from "@/types/database";
 
-export type ServiceResponse<T = any> = {
-  success: boolean;
-  data?: T;
-  error?: string;
-};
+// --- Types ---
 
-/**
- * Creates a new audit log entry.
- */
-export async function createAuditLog(
-  payload: AuditLogPayload
-): Promise<ServiceResponse<AuditLog>> {
-  try {
-    const { data, error } = await supabase
-      .from("audit_logs")
-      .insert([payload])
-      .select()
-      .single();
+export type AuditSeverity = "info" | "warning" | "critical";
 
-    if (error) {
-      console.error("[createAuditLog] Error creating audit log:", error.message);
-      return { success: false, error: error.message };
-    }
+export type AuditLog = Database["public"]["Tables"]["audit_logs"]["Row"];
+export type CreateAuditLogInput = Database["public"]["Tables"]["audit_logs"]["Insert"];
 
-    return { success: true, data: data as AuditLog };
-  } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : "An unexpected error occurred.";
-    console.error("[createAuditLog] Unexpected error:", err);
-    return { success: false, error: errorMessage };
-  }
+export interface AuditLogStatistics {
+  totalLogs: number;
+  infoLogs: number;
+  warningLogs: number;
+  criticalLogs: number;
 }
 
+// --- Error Handling ---
+
 /**
- * Fetches all audit logs, ordered by most recent first.
+ * Safely serializes and logs audit-related errors
+ */
+function handleAuditLogError(err: unknown, context: string): never {
+  const serialized = err instanceof Error ? err.message : JSON.stringify(err);
+  error(`Audit Log Service Error [${context}]: ${serialized}`, { error: err });
+  throw new Error(`Audit Log Service Failure: ${serialized}`);
+}
+
+// --- Fetch Operations ---
+
+/**
+ * Retrieves all audit logs, ordered by newest first
  */
 export async function getAuditLogs(): Promise<AuditLog[]> {
   try {
-    const { data, error } = await supabase
+    const { data, error: dbError } = await supabase
       .from("audit_logs")
       .select("*")
       .order("created_at", { ascending: false });
 
-    if (error) {
-      console.error("[getAuditLogs] Error fetching audit logs:", error.message);
-      return [];
-    }
-
-    return data as AuditLog[];
+    if (dbError) throw dbError;
+    return data || [];
   } catch (err) {
-    console.error("[getAuditLogs] Unexpected error:", err);
-    return [];
+    handleAuditLogError(err, "getAuditLogs");
   }
 }
 
 /**
- * Fetches audit logs for a specific user, ordered by most recent first.
+ * Retrieves a specific audit log by its UUID
  */
-export async function getAuditLogsByUser(user_id: string): Promise<AuditLog[]> {
+export async function getAuditLogById(id: string): Promise<AuditLog | null> {
   try {
-    const { data, error } = await supabase
+    const { data, error: dbError } = await supabase
       .from("audit_logs")
       .select("*")
-      .eq("user_id", user_id)
-      .order("created_at", { ascending: false });
+      .eq("id", id)
+      .single();
 
-    if (error) {
-      console.error(`[getAuditLogsByUser] Error fetching logs for user ${user_id}:`, error.message);
-      return [];
-    }
-
-    return data as AuditLog[];
+    if (dbError && dbError.code !== "PGRST116") throw dbError;
+    return data || null;
   } catch (err) {
-    console.error(`[getAuditLogsByUser] Unexpected error for user ${user_id}:`, err);
-    return [];
+    handleAuditLogError(err, `getAuditLogById(${id})`);
   }
 }
 
+// --- Mutation Operations ---
+
 /**
- * Fetches audit logs related to a specific entity (e.g., all changes to a specific page).
+ * Creates a new audit log entry
  */
-export async function getAuditLogsByEntity(
-  entity_type: AuditEntityType | string,
-  entity_id: string
-): Promise<AuditLog[]> {
+export async function createAuditLog(data: CreateAuditLogInput): Promise<AuditLog> {
   try {
-    const { data, error } = await supabase
+    const { data: created, error: dbError } = await supabase
       .from("audit_logs")
-      .select("*")
-      .eq("entity_type", entity_type)
-      .eq("entity_id", entity_id)
-      .order("created_at", { ascending: false });
+      .insert(data)
+      .select()
+      .single();
 
-    if (error) {
-      console.error(`[getAuditLogsByEntity] Error fetching logs for ${entity_type} ${entity_id}:`, error.message);
-      return [];
-    }
+    if (dbError) throw dbError;
 
-    return data as AuditLog[];
+    // Log the creation of the audit event itself
+    info(`Audit Log created: [${created.action}] on ${created.entity} (${created.entity_id})`);
+    return created;
   } catch (err) {
-    console.error(`[getAuditLogsByEntity] Unexpected error for ${entity_type} ${entity_id}:`, err);
-    return [];
+    handleAuditLogError(err, "createAuditLog");
   }
 }
 
 /**
- * Fetches recent audit logs with critical severity.
- * Useful for security monitoring dashboards.
+ * Safely deletes an audit log entry (Admin-only architecture)
  */
-export async function getRecentCriticalLogs(): Promise<AuditLog[]> {
+export async function deleteAuditLog(id: string): Promise<void> {
   try {
-    const { data, error } = await supabase
-      .from("audit_logs")
-      .select("*")
-      .eq("severity", "critical")
-      .order("created_at", { ascending: false });
-
-    if (error) {
-      console.error("[getRecentCriticalLogs] Error fetching critical logs:", error.message);
-      return [];
-    }
-
-    return data as AuditLog[];
-  } catch (err) {
-    console.error("[getRecentCriticalLogs] Unexpected error:", err);
-    return [];
-  }
-}
-
-/**
- * Deletes audit logs older than a specified number of days.
- * Designed for automated maintenance tasks to manage database size.
- */
-export async function deleteOldAuditLogs(days: number): Promise<ServiceResponse<null>> {
-  try {
-    const dateThreshold = new Date();
-    dateThreshold.setDate(dateThreshold.getDate() - days);
-    const isoThreshold = dateThreshold.toISOString();
-
-    const { error } = await supabase
+    const { error: dbError } = await supabase
       .from("audit_logs")
       .delete()
-      .lte("created_at", isoThreshold);
+      .eq("id", id);
 
-    if (error) {
-      console.error(`[deleteOldAuditLogs] Error deleting logs older than ${days} days:`, error.message);
-      return { success: false, error: error.message };
-    }
+    if (dbError) throw dbError;
 
-    return { success: true };
+    warn(`Audit Log deleted: ${id}. This action should be restricted to super admins.`);
   } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : "An unexpected error occurred.";
-    console.error(`[deleteOldAuditLogs] Unexpected error:`, err);
-    return { success: false, error: errorMessage };
+    handleAuditLogError(err, `deleteAuditLog(${id})`);
   }
 }
 
-export interface LogSystemActionOptions {
-  action_type: AuditActionType | string;
-  entity_type: AuditEntityType | string;
-  entity_id?: string | null;
-  entity_name?: string | null;
-  description: string;
-  severity?: AuditSeverity | string;
-  status?: AuditStatus | string;
-  user_id?: string | null;
-  user_email?: string | null;
-  user_role?: string | null;
-  previous_data?: Record<string, any> | null;
-  new_data?: Record<string, any> | null;
-  ip_address?: string | null;
-  user_agent?: string | null;
-  route_path?: string | null;
+// --- Filters & Search ---
+
+export async function getAuditLogsByUser(userId: string): Promise<AuditLog[]> {
+  try {
+    const { data, error: dbError } = await supabase
+      .from("audit_logs")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+
+    if (dbError) throw dbError;
+    return data || [];
+  } catch (err) {
+    handleAuditLogError(err, `getAuditLogsByUser(${userId})`);
+  }
+}
+
+export async function getAuditLogsByEntity(entity: string): Promise<AuditLog[]> {
+  try {
+    const { data, error: dbError } = await supabase
+      .from("audit_logs")
+      .select("*")
+      .eq("entity", entity)
+      .order("created_at", { ascending: false });
+
+    if (dbError) throw dbError;
+    return data || [];
+  } catch (err) {
+    handleAuditLogError(err, `getAuditLogsByEntity(${entity})`);
+  }
+}
+
+export async function getAuditLogsBySeverity(severity: AuditSeverity): Promise<AuditLog[]> {
+  try {
+    const { data, error: dbError } = await supabase
+      .from("audit_logs")
+      .select("*")
+      .eq("severity", severity)
+      .order("created_at", { ascending: false });
+
+    if (dbError) throw dbError;
+    return data || [];
+  } catch (err) {
+    handleAuditLogError(err, `getAuditLogsBySeverity(${severity})`);
+  }
+}
+
+export async function getRecentAuditLogs(limit: number): Promise<AuditLog[]> {
+  try {
+    const { data, error: dbError } = await supabase
+      .from("audit_logs")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (dbError) throw dbError;
+    return data || [];
+  } catch (err) {
+    handleAuditLogError(err, `getRecentAuditLogs(${limit})`);
+  }
 }
 
 /**
- * Helper function for quickly dispatching an audit log with sensible defaults.
+ * Searches audit logs by action or entity fields
  */
-export async function logSystemAction(
-  options: LogSystemActionOptions
-): Promise<ServiceResponse<AuditLog>> {
-  const payload: AuditLogPayload = {
-    action_type: options.action_type,
-    entity_type: options.entity_type,
-    entity_id: options.entity_id || null,
-    entity_name: options.entity_name || null,
-    description: options.description,
-    severity: options.severity || "medium",
-    status: options.status || "success",
-    user_id: options.user_id || null,
-    user_email: options.user_email || null,
-    user_role: options.user_role || null,
-    previous_data: options.previous_data || null,
-    new_data: options.new_data || null,
-    ip_address: options.ip_address || null,
-    user_agent: options.user_agent || null,
-    route_path: options.route_path || null,
-  };
+export async function searchAuditLogs(query: string): Promise<AuditLog[]> {
+  try {
+    if (!query.trim()) return [];
 
-  return await createAuditLog(payload);
+    const safeQuery = `%${query.trim()}%`;
+    const { data, error: dbError } = await supabase
+      .from("audit_logs")
+      .select("*")
+      .or(`action.ilike.${safeQuery},entity.ilike.${safeQuery}`)
+      .order("created_at", { ascending: false });
+
+    if (dbError) throw dbError;
+    return data || [];
+  } catch (err) {
+    handleAuditLogError(err, `searchAuditLogs(${query})`);
+  }
+}
+
+// --- Statistics & Timeline ---
+
+export async function getAuditLogStatistics(): Promise<AuditLogStatistics> {
+  try {
+    const [totalRes, infoRes, warningRes, criticalRes] = await Promise.all([
+      supabase.from("audit_logs").select("id", { count: "exact", head: true }),
+      supabase.from("audit_logs").select("id", { count: "exact", head: true }).eq("severity", "info"),
+      supabase.from("audit_logs").select("id", { count: "exact", head: true }).eq("severity", "warning"),
+      supabase.from("audit_logs").select("id", { count: "exact", head: true }).eq("severity", "critical"),
+    ]);
+
+    if (totalRes.error) throw totalRes.error;
+
+    return {
+      totalLogs: totalRes.count || 0,
+      infoLogs: infoRes.count || 0,
+      warningLogs: warningRes.count || 0,
+      criticalLogs: criticalRes.count || 0,
+    };
+  } catch (err) {
+    handleAuditLogError(err, "getAuditLogStatistics");
+  }
+}
+
+export async function getEntityAuditHistory(entity: string, entityId: string): Promise<AuditLog[]> {
+  try {
+    const { data, error: dbError } = await supabase
+      .from("audit_logs")
+      .select("*")
+      .eq("entity", entity)
+      .eq("entity_id", entityId)
+      .order("created_at", { ascending: false }); // Chronological history, newest first
+
+    if (dbError) throw dbError;
+    return data || [];
+  } catch (err) {
+    handleAuditLogError(err, `getEntityAuditHistory(${entity}, ${entityId})`);
+  }
+}
+
+// --- Convenience Helpers ---
+
+export async function logCreateAction(
+  userId: string,
+  entity: string,
+  entityId: string,
+  metadata?: Record<string, any>
+): Promise<AuditLog> {
+  return createAuditLog({
+    user_id: userId,
+    action: "create",
+    entity,
+    entity_id: entityId,
+    severity: "info",
+    metadata,
+  });
+}
+
+export async function logUpdateAction(
+  userId: string,
+  entity: string,
+  entityId: string,
+  metadata?: Record<string, any>
+): Promise<AuditLog> {
+  return createAuditLog({
+    user_id: userId,
+    action: "update",
+    entity,
+    entity_id: entityId,
+    severity: "info",
+    metadata,
+  });
+}
+
+export async function logDeleteAction(
+  userId: string,
+  entity: string,
+  entityId: string,
+  metadata?: Record<string, any>
+): Promise<AuditLog> {
+  return createAuditLog({
+    user_id: userId,
+    action: "delete",
+    entity,
+    entity_id: entityId,
+    severity: "warning", // Deletions are typically elevated to warning
+    metadata,
+  });
+}
+
+export async function logLoginAction(
+  userId: string,
+  metadata?: Record<string, any>
+): Promise<AuditLog> {
+  return createAuditLog({
+    user_id: userId,
+    action: "login",
+    entity: "auth",
+    entity_id: userId,
+    severity: "info",
+    metadata,
+  });
+}
+
+export async function logLogoutAction(
+  userId: string,
+  metadata?: Record<string, any>
+): Promise<AuditLog> {
+  return createAuditLog({
+    user_id: userId,
+    action: "logout",
+    entity: "auth",
+    entity_id: userId,
+    severity: "info",
+    metadata,
+  });
+}
+
+export async function logPermissionChange(
+  userId: string,
+  entity: string,
+  entityId: string,
+  metadata?: Record<string, any>
+): Promise<AuditLog> {
+  return createAuditLog({
+    user_id: userId,
+    action: "permission_change",
+    entity,
+    entity_id: entityId,
+    severity: "critical", // Permission changes should be highly visible
+    metadata,
+  });
+}
+
+// --- Future Compatibility Placeholders ---
+
+/**
+ * TODO: Implement export functionality for compliance audits
+ * Will return formatted CSV/JSON of logs within a date range
+ */
+export async function exportAuditLogs(startDate?: Date, endDate?: Date): Promise<void> {
+  warn(`exportAuditLogs is not yet implemented (Range: ${startDate} to ${endDate})`);
+}
+
+/**
+ * TODO: Implement archival strategy for old logs (e.g., > 90 days)
+ * Move to cold storage (S3 bucket) to maintain DB performance
+ */
+export async function archiveAuditLogs(daysOlderThan: number): Promise<void> {
+  warn(`archiveAuditLogs is not yet implemented (Days: ${daysOlderThan})`);
+}
+
+/**
+ * TODO: Implement realtime streaming of audit events
+ * Useful for SIEM integrations or live security dashboards
+ */
+export async function streamAuditEvents(): Promise<void> {
+  warn("streamAuditEvents is not yet implemented");
 }
