@@ -1,222 +1,395 @@
 import { supabase } from "@/lib/supabase";
-import type { MediaFile } from "@/types/media";
+import { info, warn, error } from "@/lib/logger";
+import type { MediaFile } from "@/types/database"; // Assuming `MediaFile` is the type for the 'media_files' table
 
+/**
+ * Common response type for service operations.
+ * Allows for consistent handling of success, data, and errors.
+ */
 export type ServiceResponse<T = any> = {
   success: boolean;
   data?: T;
   error?: string;
+  errorCode?: string; // Optional: For more granular error identification
 };
 
-export type UploadMediaResponse = {
-  success: boolean;
-  file?: MediaFile;
-  error?: string;
+/**
+ * Details returned after a successful file upload.
+ */
+export type UploadedFileDetails = {
+  filename: string;
+  path: string; // The full storage path in the bucket
+  publicUrl: string;
+  bucket: string;
+  originalName: string;
+  mimeType: string;
+  fileSize: number;
+  fileExtension: string;
 };
 
-export interface UploadOptions {
-  bucket_name: string;
-  folder?: string;
-  alt_text?: string;
-  caption?: string;
-  category?: string;
-  tags?: string[];
-  uploaded_by?: string;
-  is_public?: boolean;
+/**
+ * Standard error handler for media operations.
+ * Logs the error and returns a consistent ServiceResponse.
+ */
+export function handleMediaError(
+  functionName: string,
+  err: unknown,
+  customMessage?: string
+): ServiceResponse<null> {
+  const errorMessage = err instanceof Error ? err.message : String(err);
+  const errorCode = (err as any)?.code || "UNKNOWN_ERROR"; // Supabase errors often have a 'code'
+  error(`[${functionName}] ${customMessage || 'Operation failed'}:`, errorMessage);
+  return {
+    success: false,
+    error: customMessage || errorMessage,
+    errorCode,
+  };
 }
 
 /**
- * Generates a production-safe storage path for a file.
+ * Determines the file extension from a filename or path.
  */
-export function generateFilePath(folder: string | null | undefined, filename: string): string {
+export function getFileExtension(filename: string): string {
+  const parts = filename.split(".");
+  return parts.length > 1 ? parts.pop()!.toLowerCase() : "";
+}
+
+/**
+ * Generates a unique, production-safe filename.
+ * Prepends a timestamp and optionally a prefix, then sanitizes the original filename.
+ */
+export function generateUniqueFilename(
+  originalFilename: string,
+  prefix?: string
+): string {
   const timestamp = Date.now();
-  // Remove spaces and special characters, keep periods, dashes, and underscores
-  const sanitizedFilename = filename
-    .replace(/[^a-zA-Z0-9.\-_]/g, "")
+  const extension = getFileExtension(originalFilename);
+  const baseName = originalFilename
+    .replace(/\.[^/.]+$/, "") // Remove original extension
+    .replace(/[^a-zA-Z0-9.\-_]/g, "") // Sanitize filename
     .toLowerCase();
-  
-  const basePath = folder ? `${folder.replace(/^\/|\/$/g, "")}/` : "";
-  return `${basePath}${timestamp}-${sanitizedFilename}`;
+
+  const uniqueBase = prefix ? `${prefix}-${baseName}` : baseName;
+
+  return `${timestamp}-${uniqueBase}${extension ? `.${extension}` : ""}`;
+}
+
+/**
+ * Generates the full storage path within a bucket, including folder.
+ */
+export function generateStoragePath(
+  filename: string,
+  folder: string | null | undefined
+): string {
+  const sanitizedFolder = folder ? `${folder.replace(/^\/|\/$/g, "")}/` : "";
+  return `${sanitizedFolder}${filename}`;
 }
 
 /**
  * Generates a public URL for a file stored in a Supabase public bucket.
+ * This is primarily for files stored in public buckets.
  */
-export function getPublicFileUrl(bucket_name: string, storage_path: string): string {
-  const { data } = supabase.storage
-    .from(bucket_name)
-    .getPublicUrl(storage_path);
-    
+export function getPublicFileUrl(bucket: string, path: string): string {
+  const { data } = supabase.storage.from(bucket).getPublicUrl(path);
   return data.publicUrl;
 }
 
 /**
- * Helper to determine the media_type enum value based on mime type.
- */
-function determineMediaType(mimeType: string): MediaFile['media_type'] {
-  if (mimeType.startsWith("image/")) return "image";
-  if (mimeType.startsWith("video/")) return "video";
-  if (mimeType.startsWith("audio/")) return "audio";
-  if (mimeType === "application/pdf") return "pdf";
-  return "document";
-}
-
-/**
- * Uploads a file to Supabase Storage and records its metadata in the database.
+ * Uploads a single file to Supabase Storage.
  */
 export async function uploadMediaFile(
   file: File,
-  options: UploadOptions
-): Promise<UploadMediaResponse> {
+  bucket: string,
+  folder?: string
+): Promise<ServiceResponse<UploadedFileDetails>> {
   try {
-    const storage_path = generateFilePath(options.folder, file.name);
-    
-    // 1. Upload to Supabase Storage
+    const uniqueFilename = generateUniqueFilename(file.name);
+    const storagePath = generateStoragePath(uniqueFilename, folder);
+
     const { error: uploadError } = await supabase.storage
-      .from(options.bucket_name)
-      .upload(storage_path, file, {
-        cacheControl: "3600",
-        upsert: false,
+      .from(bucket)
+      .upload(storagePath, file, {
+        cacheControl: "3600", // Cache for 1 hour
+        upsert: false, // Do not overwrite existing files
       });
 
     if (uploadError) {
-      console.error("[uploadMediaFile] Storage upload error:", uploadError.message);
-      return { success: false, error: uploadError.message };
+      return handleMediaError(
+        "uploadMediaFile",
+        uploadError,
+        `Failed to upload file to storage: ${uniqueFilename}`
+      );
     }
 
-    // 2. Generate Public URL (assuming public bucket for CMS assets)
-    const file_url = getPublicFileUrl(options.bucket_name, storage_path);
+    const publicUrl = getPublicFileUrl(bucket, storagePath);
 
-    // 3. Prepare Metadata
-    const file_extension = file.name.split('.').pop()?.toLowerCase() || '';
-    const media_type = determineMediaType(file.type);
-    
-    const mediaPayload: Omit<MediaFile, 'id' | 'created_at' | 'updated_at'> = {
-      file_name: `${Date.now()}-${file.name}`, // Internal unique reference
-      original_name: file.name,
-      file_url,
-      thumbnail_url: null, // To be generated by edge functions or external services
-      mime_type: file.type,
-      file_size: file.size,
-      file_extension,
-      media_type,
-      alt_text: options.alt_text || null,
-      caption: options.caption || null,
-      seo_title: null,
-      seo_description: null,
-      category: options.category || null,
-      folder: options.folder || null,
-      tags: options.tags || null,
-      uploaded_by: options.uploaded_by || null,
-      bucket_name: options.bucket_name,
-      storage_path,
-      is_public: options.is_public ?? true,
-      width: null, // Would require client-side extraction or serverless trigger
-      height: null,
-      duration: null,
+    const uploadedDetails: UploadedFileDetails = {
+      filename: uniqueFilename,
+      path: storagePath,
+      publicUrl,
+      bucket,
+      originalName: file.name,
+      mimeType: file.type,
+      fileSize: file.size,
+      fileExtension: getFileExtension(file.name),
     };
 
-    // 4. Insert Metadata into 'media' table
-    const { data: dbData, error: dbError } = await supabase
-      .from("media")
-      .insert([mediaPayload])
+    info(`[uploadMediaFile] Successfully uploaded: ${publicUrl}`);
+    return { success: true, data: uploadedDetails };
+  } catch (err) {
+    return handleMediaError("uploadMediaFile", err);
+  }
+}
+
+/**
+ * Uploads multiple files in parallel to Supabase Storage.
+ * Handles partial failures by returning results for all attempts.
+ */
+export async function uploadMultipleFiles(
+  files: File[],
+  bucket: string,
+  folder?: string
+): Promise<ServiceResponse<Array<ServiceResponse<UploadedFileDetails>>>> {
+  if (!files || files.length === 0) {
+    return { success: true, data: [], error: "No files provided for upload." };
+  }
+
+  info(`[uploadMultipleFiles] Attempting to upload ${files.length} files to bucket '${bucket}'...`);
+
+  const uploadPromises = files.map((file) =>
+    uploadMediaFile(file, bucket, folder)
+  );
+
+  const results = await Promise.all(uploadPromises);
+
+  const successfulUploads = results.filter((r) => r.success).length;
+  const failedUploads = results.length - successfulUploads;
+
+  if (failedUploads > 0) {
+    warn(
+      `[uploadMultipleFiles] Completed with ${successfulUploads} successes and ${failedUploads} failures.`
+    );
+    return {
+      success: false,
+      error: `Partial upload failure: ${failedUploads} out of ${files.length} files failed to upload.`,
+      data: results,
+    };
+  }
+
+  info(
+    `[uploadMultipleFiles] Successfully uploaded all ${files.length} files.`
+  );
+  return { success: true, data: results };
+}
+
+/**
+ * Deletes a file from Supabase Storage.
+ */
+export async function deleteMediaFile(
+  bucket: string,
+  path: string
+): Promise<ServiceResponse<null>> {
+  try {
+    const { error: deleteError } = await supabase.storage
+      .from(bucket)
+      .remove([path]);
+
+    if (deleteError) {
+      return handleMediaError(
+        "deleteMediaFile",
+        deleteError,
+        `Failed to delete file from storage: ${path}`
+      );
+    }
+
+    info(`[deleteMediaFile] Successfully deleted file: ${path}`);
+    return { success: true };
+  } catch (err) {
+    return handleMediaError("deleteMediaFile", err);
+  }
+}
+
+/**
+ * Copies a file within Supabase Storage.
+ */
+export async function copyMediaFile(
+  sourceBucket: string,
+  sourcePath: string,
+  destinationBucket: string,
+  destinationPath: string
+): Promise<ServiceResponse<string>> {
+  try {
+    const { data, error: copyError } = await supabase.storage
+      .from(sourceBucket)
+      .copy(sourcePath, destinationPath, {
+        destinationBucket,
+      });
+
+    if (copyError) {
+      return handleMediaError(
+        "copyMediaFile",
+        copyError,
+        `Failed to copy file from ${sourcePath} to ${destinationPath}`
+      );
+    }
+
+    info(`[copyMediaFile] Successfully copied file from ${sourcePath} to ${destinationPath}`);
+    return { success: true, data: data?.path };
+  } catch (err) {
+    return handleMediaError("copyMediaFile", err);
+  }
+}
+
+/**
+ * Moves a file by copying it to the new location and then deleting the original.
+ */
+export async function moveMediaFile(
+  sourceBucket: string,
+  sourcePath: string,
+  destinationBucket: string,
+  destinationPath: string
+): Promise<ServiceResponse<null>> {
+  try {
+    // Step 1: Copy the file
+    const copyResult = await copyMediaFile(
+      sourceBucket,
+      sourcePath,
+      destinationBucket,
+      destinationPath
+    );
+    if (!copyResult.success) {
+      return { success: false, error: copyResult.error };
+    }
+
+    // Step 2: Delete the original file
+    const deleteResult = await deleteMediaFile(sourceBucket, sourcePath);
+    if (!deleteResult.success) {
+      // Log a warning if deletion fails, but the copy was successful.
+      // Depending on requirements, this might need to revert the copy or alert.
+      warn(
+        `[moveMediaFile] Failed to delete original file after successful copy: ${sourcePath}. Manual cleanup may be required. Error: ${deleteResult.error}`
+      );
+      // For a "move" operation, if deletion fails, the move isn't complete, so we return failure.
+      return { success: false, error: `Original file deletion failed after copy: ${deleteResult.error}` };
+    }
+
+    info(`[moveMediaFile] Successfully moved file from ${sourcePath} to ${destinationPath}`);
+    return { success: true };
+  } catch (err) {
+    return handleMediaError("moveMediaFile", err);
+  }
+}
+
+/**
+ * Lists files within a Supabase Storage bucket, optionally filtered by folder.
+ * Returns Supabase's StorageFile[] type.
+ */
+export async function listMediaFiles(
+  bucket: string,
+  folder?: string
+): Promise<ServiceResponse<any[]>> {
+  try {
+    const { data, error: listError } = await supabase.storage
+      .from(bucket)
+      .list(folder || "", {
+        limit: 100, // Adjust as needed, pagination might be required for large folders
+        offset: 0,
+        sortBy: { column: "name", order: "asc" },
+      });
+
+    if (listError) {
+      return handleMediaError(
+        "listMediaFiles",
+        listError,
+        `Failed to list files in bucket '${bucket}' folder '${folder || ""}'`
+      );
+    }
+
+    info(`[listMediaFiles] Successfully listed ${data?.length || 0} files in bucket '${bucket}' folder '${folder || ""}'.`);
+    return { success: true, data: data || [] };
+  } catch (err) {
+    return handleMediaError("listMediaFiles", err);
+  }
+}
+
+/**
+ * Saves (inserts or updates) metadata for a media file in the 'media_files' table.
+ */
+export async function saveMediaMetadata(
+  metadata: Omit<MediaFile, "id" | "created_at" | "updated_at">
+): Promise<ServiceResponse<MediaFile>> {
+  try {
+    const { data, error: dbError } = await supabase
+      .from("media_files")
+      .insert([metadata])
       .select()
       .single();
 
     if (dbError) {
-      console.error("[uploadMediaFile] Database insert error:", dbError.message);
-      // Rollback storage upload if DB fails
-      await supabase.storage.from(options.bucket_name).remove([storage_path]);
-      return { success: false, error: dbError.message };
+      return handleMediaError(
+        "saveMediaMetadata",
+        dbError,
+        `Failed to save media metadata for ${metadata.filename}`
+      );
     }
 
-    return { success: true, file: dbData as MediaFile };
+    info(`[saveMediaMetadata] Successfully saved metadata for: ${data?.filename}`);
+    return { success: true, data: data as MediaFile };
   } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : "An unexpected upload error occurred.";
-    console.error("[uploadMediaFile] Unexpected error:", err);
-    return { success: false, error: errorMessage };
+    return handleMediaError("saveMediaMetadata", err);
   }
 }
 
 /**
- * Fetches all media files, ordered by most recently created.
+ * Fetches all media files metadata from the 'media_files' table.
  */
-export async function getMediaFiles(): Promise<MediaFile[]> {
+export async function getMediaFiles(): Promise<ServiceResponse<MediaFile[]>> {
   try {
-    const { data, error } = await supabase
-      .from("media")
+    const { data, error: dbError } = await supabase
+      .from("media_files")
       .select("*")
       .order("created_at", { ascending: false });
-
-    if (error) {
-      console.error("[getMediaFiles] Error fetching media files:", error.message);
-      return [];
-    }
-
-    return data as MediaFile[];
-  } catch (err) {
-    console.error("[getMediaFiles] Unexpected error:", err);
-    return [];
-  }
-}
-
-/**
- * Fetches media files filtered by a specific category.
- */
-export async function getMediaByCategory(category: string): Promise<MediaFile[]> {
-  try {
-    const { data, error } = await supabase
-      .from("media")
-      .select("*")
-      .eq("category", category)
-      .order("created_at", { ascending: false });
-
-    if (error) {
-      console.error(`[getMediaByCategory] Error fetching media for category ${category}:`, error.message);
-      return [];
-    }
-
-    return data as MediaFile[];
-  } catch (err) {
-    console.error(`[getMediaByCategory] Unexpected error for category ${category}:`, err);
-    return [];
-  }
-}
-
-/**
- * Deletes a media file from both Storage and the database.
- */
-export async function deleteMediaFile(
-  id: string,
-  bucket_name: string,
-  storage_path: string
-): Promise<ServiceResponse<null>> {
-  try {
-    // 1. Delete from Storage
-    const { error: storageError } = await supabase.storage
-      .from(bucket_name)
-      .remove([storage_path]);
-
-    if (storageError) {
-      console.error(`[deleteMediaFile] Storage deletion error for path ${storage_path}:`, storageError.message);
-      return { success: false, error: storageError.message };
-    }
-
-    // 2. Delete from Database
-    const { error: dbError } = await supabase
-      .from("media")
-      .delete()
-      .eq("id", id);
 
     if (dbError) {
-      console.error(`[deleteMediaFile] Database deletion error for ID ${id}:`, dbError.message);
-      return { success: false, error: dbError.message };
+      return handleMediaError("getMediaFiles", dbError, "Failed to fetch all media files metadata");
     }
 
-    return { success: true };
+    info(`[getMediaFiles] Successfully fetched ${data?.length || 0} media files.`);
+    return { success: true, data: data as MediaFile[] };
   } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : "An unexpected deletion error occurred.";
-    console.error(`[deleteMediaFile] Unexpected error for ID ${id}:`, err);
-    return { success: false, error: errorMessage };
+    return handleMediaError("getMediaFiles", err);
+  }
+}
+
+/**
+ * Fetches a single media file metadata by its ID.
+ */
+export async function getMediaFileById(
+  id: string
+): Promise<ServiceResponse<MediaFile | null>> {
+  try {
+    const { data, error: dbError } = await supabase
+      .from("media_files")
+      .select("*")
+      .eq("id", id)
+      .single();
+
+    if (dbError) {
+      if (dbError.code === "PGRST116") { // No rows found
+        info(`[getMediaFileById] No media file found with ID: ${id}`);
+        return { success: true, data: null };
+      }
+      return handleMediaError(
+        "getMediaFileById",
+        dbError,
+        `Failed to fetch media file with ID: ${id}`
+      );
+    }
+
+    info(`[getMediaFileById] Successfully fetched media file: ${data?.filename}`);
+    return { success: true, data: data as MediaFile };
+  } catch (err) {
+    return handleMediaError("getMediaFileById", err);
   }
 }
 
@@ -225,54 +398,158 @@ export async function deleteMediaFile(
  */
 export async function updateMediaMetadata(
   id: string,
-  payload: Pick<MediaFile, 'alt_text' | 'caption' | 'category' | 'tags' | 'seo_title' | 'seo_description'>
+  payload: Partial<Omit<MediaFile, 'id' | 'created_at' | 'updated_at'>>
 ): Promise<ServiceResponse<MediaFile>> {
   try {
-    const { data, error } = await supabase
-      .from("media")
+    const { data, error: dbError } = await supabase
+      .from("media_files")
       .update(payload)
       .eq("id", id)
       .select()
       .single();
 
-    if (error) {
-      console.error(`[updateMediaMetadata] Error updating metadata for ID ${id}:`, error.message);
-      return { success: false, error: error.message };
+    if (dbError) {
+      return handleMediaError(
+        "updateMediaMetadata",
+        dbError,
+        `Failed to update metadata for ID ${id}`
+      );
     }
 
+    info(`[updateMediaMetadata] Successfully updated metadata for ID ${id}.`);
     return { success: true, data: data as MediaFile };
   } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : "An unexpected update error occurred.";
-    console.error(`[updateMediaMetadata] Unexpected error for ID ${id}:`, err);
-    return { success: false, error: errorMessage };
+    return handleMediaError("updateMediaMetadata", err);
+  }
+}
+
+
+/**
+ * Deletes a media file's metadata record from the 'media_files' table.
+ */
+export async function deleteMediaMetadata(
+  id: string
+): Promise<ServiceResponse<null>> {
+  try {
+    const { error: dbError } = await supabase
+      .from("media_files")
+      .delete()
+      .eq("id", id);
+
+    if (dbError) {
+      return handleMediaError(
+        "deleteMediaMetadata",
+        dbError,
+        `Failed to delete media metadata for ID: ${id}`
+      );
+    }
+
+    info(`[deleteMediaMetadata] Successfully deleted metadata for ID: ${id}`);
+    return { success: true };
+  } catch (err) {
+    return handleMediaError("deleteMediaMetadata", err);
   }
 }
 
 /**
- * Retrieves a list of distinct folder names used within the media library.
- * Useful for building folder-based navigation in a Media Manager UI.
+ * Checks if a file is an image based on its MIME type or extension.
+ * Supported: jpg, jpeg, png, webp.
  */
-export async function getMediaFolders(): Promise<string[]> {
-  try {
-    // Note: Standard Supabase JS doesn't have a SELECT DISTINCT. 
-    // We fetch non-null folders and extract unique values in memory.
-    // For very large tables, a Postgres RPC (Stored Procedure) is recommended.
-    const { data, error } = await supabase
-      .from("media")
-      .select("folder")
-      .not("folder", "is", null);
+export function isImageFile(file: File | string): boolean {
+  const mimeType = typeof file === "string" ? file : file.type;
+  const extension = typeof file === "string" ? getFileExtension(file) : getFileExtension(file.name);
 
-    if (error) {
-      console.error("[getMediaFolders] Error fetching folders:", error.message);
-      return [];
-    }
+  return (
+    mimeType.startsWith("image/") &&
+    ["jpg", "jpeg", "png", "webp"].includes(extension)
+  );
+}
 
-    const folders = data.map((item) => item.folder as string);
-    const uniqueFolders = Array.from(new Set(folders));
-    
-    return uniqueFolders.sort();
-  } catch (err) {
-    console.error("[getMediaFolders] Unexpected error:", err);
-    return [];
-  }
+/**
+ * Checks if a file is a PDF based on its MIME type or extension.
+ */
+export function isPdfFile(file: File | string): boolean {
+  const mimeType = typeof file === "string" ? file : file.type;
+  const extension = typeof file === "string" ? getFileExtension(file) : getFileExtension(file.name);
+
+  return mimeType === "application/pdf" || extension === "pdf";
+}
+
+/**
+ * Checks if a file's type is included in the allowed list.
+ * `allowedTypes` can be MIME types (e.g., "image/jpeg") or extensions (e.g., "jpg").
+ */
+export function isAllowedFileType(
+  file: File,
+  allowedTypes: string[]
+): boolean {
+  const mimeType = file.type;
+  const extension = getFileExtension(file.name);
+
+  return allowedTypes.some(
+    (allowedType) =>
+      allowedType.toLowerCase() === mimeType.toLowerCase() ||
+      allowedType.toLowerCase() === extension.toLowerCase()
+  );
+}
+
+/**
+ * Validates if a file's size is within the specified maximum limit.
+ * `maxSizeMB` is in megabytes.
+ */
+export function validateFileSize(file: File, maxSizeMB: number): boolean {
+  const maxSizeBytes = maxSizeMB * 1024 * 1024;
+  return file.size <= maxSizeBytes;
+}
+
+/**
+ * TODO: Placeholder for generating a thumbnail.
+ * This would typically involve an edge function, a serverless function,
+ * or an external service (e.g., Cloudinary, Imgix) triggered on upload.
+ */
+export async function generateThumbnail(
+  bucket: string,
+  path: string
+): Promise<ServiceResponse<string | null>> {
+  warn(`[generateThumbnail] Thumbnail generation not implemented for ${path}.`);
+  // Example placeholder for future implementation:
+  // const thumbnailPath = await triggerThumbnailGenerationService(bucket, path);
+  // return { success: true, data: thumbnailPath };
+  return { success: false, error: "Thumbnail generation not implemented yet." };
+}
+
+/**
+ * TODO: Placeholder for optimizing an image (e.g., compression, resizing).
+ * This would typically involve an edge function, a serverless function,
+ * or an external service triggered on upload.
+ */
+export async function optimizeImage(
+  bucket: string,
+  path: string
+): Promise<ServiceResponse<string | null>> {
+  warn(`[optimizeImage] Image optimization not implemented for ${path}.`);
+  // Example placeholder for future implementation:
+  // const optimizedPath = await triggerImageOptimizationService(bucket, path);
+  // return { success: true, data: optimizedPath };
+  return { success: false, error: "Image optimization not implemented yet." };
+}
+
+/**
+ * TODO: Placeholder for a virus scan of an uploaded file.
+ * This is crucial for enterprise security and would likely involve sending the
+ * file to a dedicated scanning service (e.g., ClamAV, AWS Rekognition for malware).
+ */
+export async function virusScan(
+  bucket: string,
+  path: string
+): Promise<ServiceResponse<boolean>> {
+  warn(`[virusScan] Virus scanning not implemented for ${path}.`);
+  // Example placeholder for future implementation:
+  // const scanResult = await sendFileToVirusScanService(bucket, path);
+  // return { success: true, data: scanResult.isClean };
+  return {
+    success: false,
+    error: "Virus scanning not implemented yet.",
+    data: false,
+  };
 }
